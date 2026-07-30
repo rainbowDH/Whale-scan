@@ -1,0 +1,77 @@
+name: whale-scan
+
+on:
+  schedule:
+    # 4시간마다 (UTC 기준). KST로는 00, 04, 08, 12, 16, 20시쯤
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      min_cap:
+        description: "최소 자본금 (USD)"
+        required: false
+        default: "1000000"
+      top_n:
+        description: "정밀 분석 인원"
+        required: false
+        default: "25"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: whale-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: requests 설치
+        run: pip install --quiet requests
+
+      - name: 스캔 실행
+        env:
+          MIN_CAP: ${{ github.event.inputs.min_cap || '1000000' }}
+          TOP_N: ${{ github.event.inputs.top_n || '25' }}
+          WORKERS: "3"
+        run: python scan.py
+
+      - name: 결과 커밋
+        run: |
+          if [ ! -s whales.json ]; then
+            echo "whales.json 이 비었다 — 커밋 생략"
+            exit 1
+          fi
+          git config user.name  "whale-scan"
+          git config user.email "actions@github.com"
+          git add whales.json
+          if git diff --staged --quiet; then
+            echo "변경 없음"
+          else
+            git commit -m "scan: $(date -u '+%Y-%m-%d %H:%M') UTC [skip ci]"
+            git push
+          fi
+
+      - name: 요약
+        if: always()
+        run: |
+          test -s whales.json || exit 0
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open("whales.json"))
+          print("### 스캔 완료")
+          print(f"- 전체 {d['scanned']:,}명 → 자본 통과 {d['passedCap']:,}명 → 분석 {len(d['whales'])}명")
+          print("")
+          print("| 지갑 | 자본 | 승률 | PF | MDD |")
+          print("|---|---|---|---|---|")
+          for w in sorted(d["whales"], key=lambda x: -x["accountValue"])[:8]:
+              print(f"| `{w['address'][:10]}…` | ${w['accountValue']:,.0f} | {w['winRate']*100:.0f}% | {w['pf']} | {w['mdd']*100:.0f}% |")
+          PY
